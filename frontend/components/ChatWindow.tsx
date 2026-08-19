@@ -1,0 +1,1 @@
+// Chat transcript + input box.

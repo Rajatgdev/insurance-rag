@@ -1,0 +1,56 @@
+# ── Python ────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ──────────────────────────────────
+venv/
+env/
+.venv/
+
+# ── Environment variables ─────────────────────────────────
+.env
+.env.local
+.env.production
+backend/.env
+
+# ── Logs ──────────────────────────────────────────────────
+*.log
+
+# ── Databases & data files ────────────────────────────────
+*.db
+*.sqlite3
+*.pdf
+*.csv
+*.npy
+*.xlsx
+*.jsonl
+
+# ── ML model cache ────────────────────────────────────────
+.cache/
+backend/.cache/
+**/huggingface/
+~/.cache/huggingface/
+
+# ── Index / vector store files ────────────────────────────
+backend/data/
+!backend/data/motor/
+!backend/data/motor/**
+
+# ── Next.js ───────────────────────────────────────────────
+frontend/.next/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/next-env.d.ts
+
+# ── Node general ──────────────────────────────────────────
+node_modules/
+dist/
+build/
+
+# ── OS ────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db

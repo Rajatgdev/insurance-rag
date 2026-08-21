@@ -87,6 +87,7 @@ if __name__ == "__main__":
     async def _repl():
         args = [a for a in sys.argv[1:]]
         persona = args.pop() if args and args[-1] in ("ciara", "brian", "darragh") else "ciara"
+        kind = get_persona(persona).output_kind
         convo: list[dict] = []
         pending = args[0] if args else input("you: ").strip()
         print(f"[persona: {persona}]")
@@ -104,15 +105,44 @@ if __name__ == "__main__":
                     if pending.lower() in {"quit", "exit", "q"}:
                         break
                 else:
-                    # verdict rendering (Ciara); brian/darragh renderers land with their steps
-                    print(f"\nbot verdict: {getattr(r, 'verdict', None)}   (confidence {getattr(r, 'confidence', None)})")
-                    print(getattr(r, "answer", "") or "")
-                    if getattr(r, "excess", None):
-                        print("   excess:", r.excess)
-                    for c in getattr(r, "citations", []):
-                        print(f"   - {c.insurer} | {c.section} p{c.page}: {c.detail}")
-                    if getattr(r, "exclusions_checked", []):
-                        print("   exclusions checked:", "; ".join(r.exclusions_checked))
+                    _render(r, kind)
                     break
+
+    def _cites(items):
+        for c in items:
+            print(f"      - {c.insurer} | {c.section} p{c.page}: {c.detail}")
+
+    def _render(r, kind):
+        if kind == "verdict":
+            print(f"\nverdict: {r.verdict}   (confidence {r.confidence})")
+            print(r.answer or "")
+            if r.excess:
+                print("   excess:", r.excess)
+            _cites(r.citations)
+            if r.exclusions_checked:
+                print("   exclusions checked:", "; ".join(r.exclusions_checked))
+        elif kind == "wording_read":
+            print(f"\nwording read   (confidence {r.confidence})")
+            print("  summary:", r.summary or "")
+            if r.grants:
+                print("  grants:")
+                for g in r.grants:
+                    print("      +", g)
+            if r.notable_exclusions:
+                print("  notable exclusions:")
+                _cites(r.notable_exclusions)
+            if r.warranties_conditions:
+                print("  warranties/conditions:")
+                _cites(r.warranties_conditions)
+            if r.gaps:
+                print("  gaps:")
+                for g in r.gaps:
+                    print("      !", g)
+            if r.endorsements_plain:
+                print("  endorsements:")
+                for e in r.endorsements_plain:
+                    print("      ~", e)
+        else:
+            print("\n(comparison rendering arrives with step 4)")
 
     asyncio.run(_repl())

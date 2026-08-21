@@ -10,6 +10,8 @@ Standalone check (needs DB + OpenAI + BM25 index + reranker):
     python -m reasoning.answerer "my windscreen cracked, am I covered?"
     python -m reasoning.answerer "..." brian
 """
+from datetime import datetime, timezone
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,10 +19,38 @@ from config import settings
 from db.models import Document
 from personas.registry import Persona, get_persona
 from reasoning.llm import parse_structured
-from reasoning.schemas import PersonaAnswer, Triage, ComparisonTriage
+from reasoning.schemas import (PersonaAnswer, Triage, ComparisonTriage,
+                               AuditRecord, ExaminedClause, Envelope)
 from retrieval.dense_index import Retrieved
 from retrieval.pipeline import retrieve
 from retrieval.comparison import retrieve_for_comparison
+
+
+def _count_cited(ans: PersonaAnswer) -> int:
+    """Count clause citations the model actually grounded its answer on, across any schema."""
+    n = 0
+    for attr in ("citations", "notable_exclusions", "warranties_conditions"):
+        n += len(getattr(ans, attr, []) or [])
+    for row in getattr(ans, "rows", []) or []:                 # comparison cells
+        n += sum(1 for c in row.cells if c.section or c.page)
+    return n
+
+
+def _build_envelope(persona: Persona, query: str, examined: list[Retrieved],
+                    ans: PersonaAnswer) -> Envelope:
+    audit = AuditRecord(
+        persona=persona.id,
+        query=query,
+        insurers_examined=list(dict.fromkeys(c.insurer for c in examined)),
+        clauses_examined=[
+            ExaminedClause(insurer=c.insurer, section=c.section, page=c.page, is_exclusion=c.is_exclusion)
+            for c in examined
+        ],
+        clauses_examined_count=len(examined),
+        clauses_cited_count=_count_cited(ans),
+        timestamp=datetime.now(timezone.utc).isoformat(),
+    )
+    return Envelope(persona=persona.id, output_kind=persona.output_kind, answer=ans, audit=audit)
 
 
 async def known_insurers(session: AsyncSession) -> list[str]:
@@ -96,22 +126,26 @@ RETRIEVED {insurer} POLICY CLAUSES:
 {context}"""
 
 
-async def _answer_single_insurer(session: AsyncSession, messages: list[dict], persona: Persona) -> PersonaAnswer:
+async def _answer_single_insurer(session: AsyncSession, messages: list[dict],
+                                 persona: Persona, query: str) -> Envelope:
     insurers = await known_insurers(session)
     triage = await parse_structured(settings.LLM_MODEL_FAST, _triage_system(insurers), messages, Triage)
 
     if not triage.insurer or triage.insurer not in insurers:
-        return persona.schema(
+        clar = persona.schema(
             mode="clarify",
             questions=[f"Which insurer is the policy with? ({', '.join(insurers)})"],
         )
+        return _build_envelope(persona, query, [], clar)   # nothing retrieved yet
 
-    context = _format_context(await retrieve(session, triage.issue, insurer=triage.insurer))
-    system = _reason_system(persona, triage.insurer, context)
-    return await parse_structured(settings.LLM_MODEL, system, messages, persona.schema)
+    examined = await retrieve(session, triage.issue, insurer=triage.insurer)
+    system = _reason_system(persona, triage.insurer, _format_context(examined))
+    ans = await parse_structured(settings.LLM_MODEL, system, messages, persona.schema)
+    return _build_envelope(persona, query, examined, ans)
 
 
-async def _answer_multi_insurer(session: AsyncSession, messages: list[dict], persona: Persona) -> PersonaAnswer:
+async def _answer_multi_insurer(session: AsyncSession, messages: list[dict],
+                                persona: Persona, query: str) -> Envelope:
     known = await known_insurers(session)
     triage = await parse_structured(
         settings.LLM_MODEL_FAST, _comparison_triage_system(known), messages, ComparisonTriage)
@@ -119,22 +153,33 @@ async def _answer_multi_insurer(session: AsyncSession, messages: list[dict], per
     # keep only valid named insurers; none named -> compare all
     chosen = [i for i in triage.insurers if i in known] or known
     if len(chosen) < 2:
-        return persona.schema(
+        clar = persona.schema(
             mode="clarify",
             questions=[f"Which insurers should I compare? Name at least two of: {', '.join(known)}."],
         )
+        return _build_envelope(persona, query, [], clar)
 
     grouped = await retrieve_for_comparison(session, triage.issue, chosen)
+    examined = [c for chunks in grouped.values() for c in chunks]   # every clause we read
     system = _comparison_reason_system(persona, chosen, _format_grouped_context(grouped))
-    return await parse_structured(settings.LLM_MODEL, system, messages, persona.schema)
+    ans = await parse_structured(settings.LLM_MODEL, system, messages, persona.schema)
+    return _build_envelope(persona, query, examined, ans)
 
 
-async def answer(session: AsyncSession, messages: list[dict], persona: str = "ciara") -> PersonaAnswer:
+def _latest_user(messages: list[dict]) -> str:
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            return m.get("content", "")
+    return ""
+
+
+async def answer(session: AsyncSession, messages: list[dict], persona: str = "ciara") -> Envelope:
     p = get_persona(persona)
+    query = _latest_user(messages)
     if p.retrieval_mode == "single_insurer":
-        return await _answer_single_insurer(session, messages, p)
+        return await _answer_single_insurer(session, messages, p, query)
     if p.retrieval_mode == "multi_insurer":
-        return await _answer_multi_insurer(session, messages, p)
+        return await _answer_multi_insurer(session, messages, p, query)
     raise NotImplementedError(f"unknown retrieval_mode {p.retrieval_mode!r}")
 
 
@@ -153,7 +198,8 @@ if __name__ == "__main__":
         async with async_session() as s:
             while True:
                 convo.append({"role": "user", "content": pending})
-                r = await answer(s, convo, persona)
+                env = await answer(s, convo, persona)
+                r = env.answer
 
                 if r.mode == "clarify":
                     print("\nbot (needs a bit more):")
@@ -165,6 +211,10 @@ if __name__ == "__main__":
                         break
                 else:
                     _render(r, kind)
+                    a = env.audit
+                    print(f"\n  ── audit ── examined {a.clauses_examined_count} clauses across "
+                          f"{len(a.insurers_examined)} insurer(s) ({', '.join(a.insurers_examined)}); "
+                          f"cited {a.clauses_cited_count}. {a.timestamp}")
                     break
 
     def _cites(items):

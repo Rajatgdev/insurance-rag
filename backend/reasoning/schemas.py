@@ -10,11 +10,12 @@ Per-persona answer shapes (selected by persona.output_kind):
   - WordingReadResponse  Brian (underwriter): veteran read of one wording
   - ComparisonResponse   Darragh (broker): cited cross-insurer comparison matrix
 
-CoPilotResponse is retained until the answerer is migrated (step 2), so nothing breaks.
+Envelope wraps a persona answer with an AuditRecord — the E&O / IDD provenance trail that
+OUR code assembles from the retrieved context (never the LLM).
 """
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, SerializeAsAny
 
 
 # ── shared ────────────────────────────────────────────────────────────────
@@ -115,10 +116,38 @@ class ComparisonResponse(PersonaAnswer):
     confidence: float | None = Field(default=None)
 
 
-# ── retained until answerer migration (step 2) ────────────────────────────
-class CoPilotResponse(PersonaAnswer):
-    verdict: Literal["Covered", "Not covered", "Partial", "Unclear"] | None = None
-    answer: str | None = None
-    citations: list[Citation] = Field(default_factory=list)
-    exclusions_checked: list[str] = Field(default_factory=list)
-    confidence: float | None = None
+# ── audit record — assembled by OUR code, never the LLM ───────────────────
+class ExaminedClause(BaseModel):
+    """Metadata for one clause we put in front of the model (not the full text)."""
+    insurer: str
+    section: str | None = None
+    page: int | None = None
+    is_exclusion: bool = False
+
+
+class AuditRecord(BaseModel):
+    """Defensible E&O / IDD trail: what was asked, which policies were read, what grounded it.
+
+    Built deterministically from the retrieved context — this is provenance, not model output,
+    so it can be trusted as evidence of what was examined.
+    """
+    persona: str
+    query: str
+    insurers_examined: list[str] = Field(default_factory=list)
+    clauses_examined: list[ExaminedClause] = Field(
+        default_factory=list, description="Every clause put in context — proves the whole market was read.")
+    clauses_examined_count: int = 0
+    clauses_cited_count: int = 0
+    timestamp: str = Field(description="UTC ISO-8601 time the answer was produced.")
+
+
+class Envelope(BaseModel):
+    """What the API returns: the persona's answer plus the audit trail that backs it.
+
+    SerializeAsAny keeps every persona subclass's fields (verdict/excess, grants/gaps,
+    rows/cells) instead of narrowing to the PersonaAnswer base.
+    """
+    persona: str
+    output_kind: str
+    answer: SerializeAsAny[PersonaAnswer]
+    audit: AuditRecord

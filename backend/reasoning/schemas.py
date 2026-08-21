@@ -26,13 +26,23 @@ class Citation(BaseModel):
 
 
 class Triage(BaseModel):
-    """Cheap first pass: figure out which policy we're dealing with before retrieving."""
+    """Cheap first pass for single-insurer personas: which one policy are we reading?"""
     insurer: str | None = Field(
         default=None,
         description="Exact insurer name from the allowed list if the user has named one "
                     "anywhere in the conversation, otherwise null.",
     )
     issue: str = Field(description="The coverage question/topic in a few words, e.g. 'windscreen damage'.")
+
+
+class ComparisonTriage(BaseModel):
+    """Cheap first pass for the broker: which insurers to compare, on what topic."""
+    insurers: list[str] = Field(
+        default_factory=list,
+        description="The insurers the user named to compare, each an exact name from the allowed "
+                    "list. Empty list means the user named none — compare all of them.",
+    )
+    issue: str = Field(description="The coverage topic to compare, in a few words, e.g. 'windscreen cover'.")
 
 
 class PersonaAnswer(BaseModel):

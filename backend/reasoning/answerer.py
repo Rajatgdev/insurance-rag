@@ -17,9 +17,10 @@ from config import settings
 from db.models import Document
 from personas.registry import Persona, get_persona
 from reasoning.llm import parse_structured
-from reasoning.schemas import PersonaAnswer, Triage
+from reasoning.schemas import PersonaAnswer, Triage, ComparisonTriage
 from retrieval.dense_index import Retrieved
 from retrieval.pipeline import retrieve
+from retrieval.comparison import retrieve_for_comparison
 
 
 async def known_insurers(session: AsyncSession) -> list[str]:
@@ -43,6 +44,44 @@ def _triage_system(insurers: list[str]) -> str:
         "- issue: the coverage topic in a few words.\n"
         "Do not guess an insurer the user hasn't stated."
     )
+
+
+def _comparison_triage_system(insurers: list[str]) -> str:
+    return (
+        "You set up a broker's cross-insurer comparison. From the whole conversation, identify:\n"
+        f"- insurers: the insurers the user asked to compare, each EXACTLY one of: "
+        f"{', '.join(insurers)}. If the user named none, return an empty list (means compare all).\n"
+        "- issue: the coverage topic to compare, in a few words.\n"
+        "Only include insurers the user actually named; do not invent any."
+    )
+
+
+def _format_grouped_context(grouped: dict) -> str:
+    """Context labelled and grouped by insurer, so the model can align terminology per column."""
+    blocks = []
+    for insurer, chunks in grouped.items():
+        clauses = "\n\n".join(
+            f"[{c.section} | p{c.page} | {'EXCLUSION' if c.is_exclusion else c.role}]\n{c.content}"
+            for c in chunks
+        )
+        blocks.append(f"=== {insurer} ===\n{clauses or '(no relevant clauses found)'}")
+    return "\n\n".join(blocks)
+
+
+def _comparison_reason_system(persona: Persona, insurers: list[str], context: str) -> str:
+    return f"""{persona.prompt()}
+
+You are comparing the SAME coverage topic across these insurers, in this column order:
+{', '.join(insurers)}.
+Use ONLY the retrieved clauses below. Each insurer's clauses are grouped under its name; insurers
+name and place cover differently, so align them into shared dimensions and compare like with like.
+Every cell must be cited (section, page). If an insurer is silent on a dimension, say so and set
+is_gap=true. Do not invent cover an insurer's clauses don't show.
+
+Guardrail: {persona.disclaimer}
+
+RETRIEVED CLAUSES BY INSURER:
+{context}"""
 
 
 def _reason_system(persona: Persona, insurer: str, context: str) -> str:
@@ -72,11 +111,31 @@ async def _answer_single_insurer(session: AsyncSession, messages: list[dict], pe
     return await parse_structured(settings.LLM_MODEL, system, messages, persona.schema)
 
 
+async def _answer_multi_insurer(session: AsyncSession, messages: list[dict], persona: Persona) -> PersonaAnswer:
+    known = await known_insurers(session)
+    triage = await parse_structured(
+        settings.LLM_MODEL_FAST, _comparison_triage_system(known), messages, ComparisonTriage)
+
+    # keep only valid named insurers; none named -> compare all
+    chosen = [i for i in triage.insurers if i in known] or known
+    if len(chosen) < 2:
+        return persona.schema(
+            mode="clarify",
+            questions=[f"Which insurers should I compare? Name at least two of: {', '.join(known)}."],
+        )
+
+    grouped = await retrieve_for_comparison(session, triage.issue, chosen)
+    system = _comparison_reason_system(persona, chosen, _format_grouped_context(grouped))
+    return await parse_structured(settings.LLM_MODEL, system, messages, persona.schema)
+
+
 async def answer(session: AsyncSession, messages: list[dict], persona: str = "ciara") -> PersonaAnswer:
     p = get_persona(persona)
     if p.retrieval_mode == "single_insurer":
         return await _answer_single_insurer(session, messages, p)
-    raise NotImplementedError(f"retrieval_mode {p.retrieval_mode!r} arrives in step 4 (Darragh)")
+    if p.retrieval_mode == "multi_insurer":
+        return await _answer_multi_insurer(session, messages, p)
+    raise NotImplementedError(f"unknown retrieval_mode {p.retrieval_mode!r}")
 
 
 if __name__ == "__main__":
@@ -143,6 +202,21 @@ if __name__ == "__main__":
                 for e in r.endorsements_plain:
                     print("      ~", e)
         else:
-            print("\n(comparison rendering arrives with step 4)")
+            # comparison (Darragh)
+            print(f"\ncomparison: {r.topic}   (confidence {r.confidence})")
+            cols = r.insurers
+            print("  insurers:", " | ".join(cols))
+            for row in r.rows:
+                print(f"\n  · {row.dimension}")
+                for cell in row.cells:
+                    gap = "  [GAP]" if cell.is_gap else ""
+                    src = f" ({cell.section} p{cell.page})" if cell.section else ""
+                    print(f"      {cell.insurer}: {cell.value}{src}{gap}")
+            if r.gaps:
+                print("\n  gaps to raise:")
+                for g in r.gaps:
+                    print("      !", g)
+            if r.summary:
+                print("\n  summary:", r.summary)
 
     asyncio.run(_repl())

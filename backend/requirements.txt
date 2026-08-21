@@ -9,14 +9,10 @@ pgvector
 httpx
 openai
 bm25s
-faiss-cpu
-numpy
-scipy
+numpy<2
 transformers
 torch
-sentencepiece
 pymupdf
-pyyaml
 
 # dev
 pytest

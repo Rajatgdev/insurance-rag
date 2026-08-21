@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     RETRIEVAL_TOP_K: int = 40             # wide net; rerank shrinks it
     RERANK_TOP_K: int = 8
     EXCLUSION_TOP_K: int = 6              # separate exclusion-retrieval pass
+    EXCLUSION_MIN_IN_CONTEXT: int = 2     # guarantee >= this many exclusions survive reranking
+    PRIMARY_INSURERS: int = 2             # how many top insurers to expand into full policy context
+    EXPAND_CAP: int = 8                   # per-category cap on expansion chunks per insurer
     EMBED_CACHE_SIZE: int = 2048
 
     RERANKER_MODEL: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"

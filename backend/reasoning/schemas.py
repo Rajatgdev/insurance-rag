@@ -46,14 +46,43 @@ class ComparisonTriage(BaseModel):
     issue: str = Field(description="The coverage topic to compare, in a few words, e.g. 'windscreen cover'.")
 
 
+class HandoffFacts(BaseModel):
+    """Neutral facts carried across a handoff — the minimum, not the transcript (Sierra's rule)."""
+    topic: str = Field(default="", description="The coverage topic, e.g. 'windscreen damage'.")
+    insurers: list[str] = Field(default_factory=list, description="Insurers in play, if any were named.")
+    circumstances: str = Field(default="", description="Salient facts the user stated, one line.")
+
+
+class LaneCheck(BaseModel):
+    """Cheap triage-time classification: which lane does this question belong to, plus the
+    neutral facts to carry if a handoff is needed. Runs before any retrieval/reasoning."""
+    lanes: list[Literal["claim", "wording", "comparison"]] = Field(
+        default_factory=list,
+        description="Every lane the question touches. 'claim' = is a specific claim payable; "
+                    "'wording' = read/explain what a policy grants and excludes; "
+                    "'comparison' = compare cover across multiple insurers.",
+    )
+    facts: HandoffFacts = Field(default_factory=HandoffFacts)
+
+
+class ReferralNote(BaseModel):
+    """A persona declining out-of-lane work and offering a handoff to the right persona."""
+    to_persona: str
+    to_name: str
+    reason: str = Field(description="Why this belongs to the other persona, one sentence, in-voice.")
+    facts: HandoffFacts
+
+
 class PersonaAnswer(BaseModel):
-    """Base every persona answer inherits: clarify OR answer, decided in one call."""
-    mode: Literal["clarify", "answer"]
+    """Base every persona answer inherits: clarify, answer, or refer — decided in one call."""
+    mode: Literal["clarify", "answer", "refer"]
     questions: list[str] = Field(
         default_factory=list,
         description="When mode='clarify': 1-3 sharp questions whose answers change the outcome, "
                     "grounded in the actual exclusions/conditions of the retrieved wording.",
     )
+    referral: ReferralNote | None = Field(
+        default=None, description="When mode='refer': the handoff offer to another persona.")
 
 
 # ── Ciara — claims: cited coverage verdict ────────────────────────────────
@@ -138,6 +167,8 @@ class AuditRecord(BaseModel):
         default_factory=list, description="Every clause put in context — proves the whole market was read.")
     clauses_examined_count: int = 0
     clauses_cited_count: int = 0
+    referred_to: str | None = Field(
+        default=None, description="If this turn was a handoff offer, the persona it referred to.")
     timestamp: str = Field(description="UTC ISO-8601 time the answer was produced.")
 
 

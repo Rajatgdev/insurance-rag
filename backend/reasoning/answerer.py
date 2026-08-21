@@ -17,10 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
 from db.models import Document
-from personas.registry import Persona, get_persona
+from personas.registry import Persona, get_persona, persona_for_lane
 from reasoning.llm import parse_structured
 from reasoning.schemas import (PersonaAnswer, Triage, ComparisonTriage,
-                               AuditRecord, ExaminedClause, Envelope)
+                               AuditRecord, ExaminedClause, Envelope,
+                               LaneCheck, ReferralNote)
 from retrieval.dense_index import Retrieved
 from retrieval.pipeline import retrieve
 from retrieval.comparison import retrieve_for_comparison
@@ -37,7 +38,7 @@ def _count_cited(ans: PersonaAnswer) -> int:
 
 
 def _build_envelope(persona: Persona, query: str, examined: list[Retrieved],
-                    ans: PersonaAnswer) -> Envelope:
+                    ans: PersonaAnswer, referred_to: str | None = None) -> Envelope:
     audit = AuditRecord(
         persona=persona.id,
         query=query,
@@ -48,6 +49,7 @@ def _build_envelope(persona: Persona, query: str, examined: list[Retrieved],
         ],
         clauses_examined_count=len(examined),
         clauses_cited_count=_count_cited(ans),
+        referred_to=referred_to,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
     return Envelope(persona=persona.id, output_kind=persona.output_kind, answer=ans, audit=audit)
@@ -173,14 +175,76 @@ def _latest_user(messages: list[dict]) -> str:
     return ""
 
 
-async def answer(session: AsyncSession, messages: list[dict], persona: str = "ciara") -> Envelope:
+def _lanecheck_system() -> str:
+    return (
+        "Classify an insurance question by which lane(s) of work it needs, and extract neutral "
+        "facts. Lanes:\n"
+        "- claim: whether a specific described claim is payable under a policy.\n"
+        "- wording: reading or explaining what one policy grants, excludes or requires.\n"
+        "- comparison: comparing cover across two or more insurers.\n"
+        "Return every lane the question genuinely touches (often just one). Extract facts: the "
+        "coverage topic, any insurers named, and the salient circumstances the user stated."
+    )
+
+
+async def _referral_gate(session: AsyncSession, messages: list[dict], persona: Persona,
+                         query: str) -> Envelope | None:
+    """Intercept BEFORE retrieval/reasoning (Sierra's supervisor pattern). If the question is
+    WHOLLY outside this persona's lane, return a refer envelope; otherwise None (proceed).
+    Partly-in-lane questions (this persona's lane is among those detected) are NOT referred."""
+    lc = await parse_structured(settings.LLM_MODEL_FAST, _lanecheck_system(), messages, LaneCheck)
+
+    if not lc.lanes or persona.lane in lc.lanes:
+        return None  # in lane (or unclassifiable) -> the persona handles it
+
+    # wholly out of lane: refer to the owner of the first detected lane we have a persona for
+    target = next((persona_for_lane(l) for l in lc.lanes if persona_for_lane(l)), None)
+    if target is None or target.id == persona.id:
+        return None  # no better owner -> let the persona try rather than dead-end
+
+    note = ReferralNote(
+        to_persona=target.id, to_name=target.name,
+        reason=f"This is {target.role.lower()} work ({target.lane}), which is {target.name}'s area.",
+        facts=lc.facts,
+    )
+    refer = persona.schema(mode="refer", referral=note)
+    return _build_envelope(persona, query, [], refer, referred_to=target.id)
+
+
+async def answer(session: AsyncSession, messages: list[dict], persona: str = "ciara",
+                 handoff: dict | None = None) -> Envelope:
+    """Answer as `persona`. If `handoff` is provided (a confirmed referral's carried facts:
+    {topic, insurers, circumstances}), it seeds the conversation so the target persona starts
+    from the facts rather than the origin persona's framing — the memory-transfer contract."""
     p = get_persona(persona)
+
+    if handoff:
+        seed = _seed_from_facts(handoff)
+        messages = [{"role": "user", "content": seed}, *messages]
+
     query = _latest_user(messages)
+
+    referral = await _referral_gate(session, messages, p, query)
+    if referral is not None:
+        return referral
+
     if p.retrieval_mode == "single_insurer":
         return await _answer_single_insurer(session, messages, p, query)
     if p.retrieval_mode == "multi_insurer":
         return await _answer_multi_insurer(session, messages, p, query)
     raise NotImplementedError(f"unknown retrieval_mode {p.retrieval_mode!r}")
+
+
+def _seed_from_facts(facts: dict) -> str:
+    """Turn carried handoff facts into a neutral opening turn for the target persona."""
+    parts = []
+    if facts.get("topic"):
+        parts.append(f"Topic: {facts['topic']}.")
+    if facts.get("insurers"):
+        parts.append(f"Insurers: {', '.join(facts['insurers'])}.")
+    if facts.get("circumstances"):
+        parts.append(f"Details: {facts['circumstances']}.")
+    return " ".join(parts) or "(no details carried)"
 
 
 if __name__ == "__main__":
@@ -209,6 +273,13 @@ if __name__ == "__main__":
                     pending = input("\nyou: ").strip()
                     if pending.lower() in {"quit", "exit", "q"}:
                         break
+                elif r.mode == "refer":
+                    ref = r.referral
+                    print(f"\nbot (out of my lane): {ref.reason}")
+                    print(f"   → hand off to {ref.to_name}?  facts: topic={ref.facts.topic!r}, "
+                          f"insurers={ref.facts.insurers}, circumstances={ref.facts.circumstances!r}")
+                    print(f"   [audit] referred_to = {env.audit.referred_to}")
+                    break
                 else:
                     _render(r, kind)
                     a = env.audit

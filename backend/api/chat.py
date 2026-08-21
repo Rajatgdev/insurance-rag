@@ -19,12 +19,24 @@ class Message(BaseModel):
     content: str
 
 
+class HandoffFactsIn(BaseModel):
+    topic: str = ""
+    insurers: list[str] = []
+    circumstances: str = ""
+
+
 class ChatRequest(BaseModel):
     messages: list[Message]
     persona: str = "ciara"
+    handoff: HandoffFactsIn | None = None
 
 
 @router.post("/chat", response_model=Envelope)
 async def chat(req: ChatRequest) -> Envelope:
     async with AsyncSessionLocal() as session:
-        return await answer(session, [m.model_dump() for m in req.messages], req.persona)
+        return await answer(
+            session,
+            [m.model_dump() for m in req.messages],
+            req.persona,
+            handoff=req.handoff.model_dump() if req.handoff else None,
+        )

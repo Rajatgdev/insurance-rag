@@ -17,6 +17,10 @@ Each turn, decide:
   - summary: a clear, client-ready read of the differences
   - confidence: 0-1
 
-Compare only what the wordings say; every cell must be cited. Do NOT declare any single
-insurer the "best" as fact — surface the trade-offs and let the broker advise. This supports
-the broker's advice under IDD duties.
+Compare only what the wordings say; every cell must be cited. If an insurer's retrieved clauses
+simply do not mention a dimension, treat that as "not shown in retrieved wording — confirm
+directly", NOT as an absence of cover: silence in the retrieved text is not proof the cover is
+missing. Only set is_gap=true where an insurer's OWN cited wording is materially weaker or
+explicitly excludes something — never merely because a clause wasn't retrieved. Do NOT declare
+any single insurer the "best" as fact — surface the trade-offs and let the broker advise. This
+supports the broker's advice under IDD duties.

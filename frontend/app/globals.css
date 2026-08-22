@@ -3,19 +3,58 @@
 @tailwind utilities;
 
 :root {
-  --paper: #eef1f1;
-  --ink: #12211f;
-  --petrol: #0e4a44;
+  /* cool document palette — light, authoritative */
+  --paper: #f5f6f7;
+  --surface: #ffffff;
+  --surface-2: #eef1f2;
+  --ink: #16191c;
+  --ink-muted: #59636a;
+  --ink-subtle: #8a939a;
+  --hairline: #e4e8ea;
+  --hairline-strong: #d2d9dc;
+
+  /* semantic verdict colours (AA on white) */
+  --covered: #147a52;
+  --covered-bg: #e7f4ee;
+  --notcovered: #b23a30;
+  --notcovered-bg: #fbeae8;
+  --partial: #a9721a;
+  --partial-bg: #fbf2e2;
+  --unclear: #59636a;
+  --unclear-bg: #eef1f2;
+
+  /* active-persona accent (overridden at runtime) */
+  --accent: #3a5cc7;
+  --accent-soft: #eaeefb;
 }
+
+* { border-color: var(--hairline); }
 
 body {
-  font-family: var(--font-sans), system-ui, sans-serif;
   background: var(--paper);
   color: var(--ink);
+  font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
+  font-feature-settings: "cv01", "ss03";
+  -webkit-font-smoothing: antialiased;
+  letter-spacing: -0.011em;
 }
 
-.font-mono { font-family: var(--font-mono), ui-monospace, monospace; }
+.mono { font-family: var(--font-mono), ui-monospace, "SF Mono", monospace; font-feature-settings: normal; font-variant-numeric: tabular-nums; }
+.tnum { font-variant-numeric: tabular-nums; }
 
-/* thin, quiet scrollbar for the transcript */
-.transcript::-webkit-scrollbar { width: 8px; }
-.transcript::-webkit-scrollbar-thumb { background: #cdd6d5; border-radius: 8px; }
+/* Linear's signature UI weight — requires Inter variable */
+.w-ui     { font-variation-settings: "wght" 510; }
+.w-strong { font-variation-settings: "wght" 590; }
+
+.eyebrow {
+  font-size: 11px; line-height: 1.3; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--ink-subtle);
+  font-variation-settings: "wght" 510;
+}
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: var(--hairline-strong); border-radius: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@keyframes pulse-soft { 0%,100% { opacity: .45 } 50% { opacity: .9 } }
+.thinking { animation: pulse-soft 1.4s ease-in-out infinite; }

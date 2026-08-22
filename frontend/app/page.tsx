@@ -1,191 +1,184 @@
-// Root chat page.
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { chat, type Message, type CoPilotResponse } from "@/lib/api";
+import { useState } from "react";
+import { chat, type Envelope, type HandoffFacts, type Message, type ReferralNote } from "@/lib/api";
+import { PERSONAS, type PersonaId } from "@/lib/personas";
+import { PersonaRail, type ThreadMeta } from "@/components/PersonaRail";
+import { Conversation, type Turn } from "@/components/Conversation";
+import { AuditInspector } from "@/components/AuditInspector";
 
-type Turn =
-  | { who: "user"; text: string }
-  | { who: "bot"; res: CoPilotResponse };
+interface Thread {
+  meta: ThreadMeta;
+  turns: Turn[];
+  seededHandoff?: HandoffFacts;   // consumed on the first send after a handoff
+}
 
-const VERDICT: Record<string, { fg: string; bg: string; bd: string }> = {
-  "Covered":     { fg: "#0e7c5a", bg: "#e7f4ee", bd: "#bfe3d3" },
-  "Not covered": { fg: "#b4322a", bg: "#fbeceb", bd: "#f0cbc7" },
-  "Partial":     { fg: "#b7791f", bg: "#fbf3e3", bd: "#eeddb8" },
-  "Unclear":     { fg: "#52616b", bg: "#eef1f2", bd: "#d3dadd" },
-};
+let SEQ = 1;
+const newId = () => `t${SEQ++}`;
 
-const EXAMPLES = [
-  "My AXA windscreen cracked from a stone, comprehensive cover — am I covered?",
-  "Zurich policy, is driving in the UK covered?",
-  "Can I claim on RSA if a learner driver damaged the car?",
-];
+function shortTitle(s: string) {
+  const t = s.trim().replace(/\s+/g, " ");
+  return t.length > 42 ? t.slice(0, 42) + "…" : t || "New thread";
+}
+
+// Turn carried facts into a readable opening line (mirrors the backend seed).
+function seedText(f: HandoffFacts): string {
+  const parts: string[] = [];
+  if (f.topic) parts.push(f.topic);
+  if (f.insurers?.length) parts.push(`across ${f.insurers.join(", ")}`);
+  if (f.circumstances) parts.push(`— ${f.circumstances}`);
+  return parts.join(" ") || "(handoff)";
+}
 
 export default function Page() {
-  const [turns, setTurns] = useState<Turn[]>([]);
+  const [active, setActive] = useState<PersonaId>("ciara");
+  const [threads, setThreads] = useState<Record<string, Thread>>({});
+  const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
-  const endRef = useRef<HTMLDivElement>(null);
+  const [selectedTurn, setSelectedTurn] = useState<number | null>(null);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ behavior: "smooth" }); }, [turns, busy]);
+  const threadList = Object.values(threads).map((t) => t.meta);
+  const current = activeThreadId ? threads[activeThreadId] ?? null : null;
 
-  function history(next: Turn[]): Message[] {
-    return next.map((t) =>
-      t.who === "user"
-        ? { role: "user" as const, content: t.text }
-        : { role: "assistant" as const, content: t.res.mode === "clarify"
-            ? t.res.questions.join(" ")
-            : `${t.res.verdict}. ${t.res.answer ?? ""}` });
+  function selectPersona(p: PersonaId) {
+    setActive(p);
+    const mine = Object.values(threads).filter((t) => t.meta.persona === p);
+    setActiveThreadId(mine.length ? mine[mine.length - 1].meta.id : null);
+    setSelectedTurn(null);
   }
 
-  async function send(text: string) {
-    const q = text.trim();
-    if (!q || busy) return;
-    const next: Turn[] = [...turns, { who: "user", text: q }];
-    setTurns(next);
+  // Core send. Optionally target a specific thread + carry seeded facts (used by handoff).
+  async function sendTo(threadId: string, text: string, persona: PersonaId, seeded?: HandoffFacts) {
+    const existing = threads[threadId];
+    const priorTurns = existing ? existing.turns : [];
+    const nextTurns: Turn[] = [...priorTurns, { who: "user", text }];
+
+    setThreads((prev) => {
+      const cur = prev[threadId];
+      return {
+        ...prev,
+        [threadId]: {
+          ...cur,
+          turns: nextTurns,
+          seededHandoff: undefined,
+          meta: { ...cur.meta, title: priorTurns.length === 0 ? shortTitle(text) : cur.meta.title },
+        },
+      };
+    });
     setInput("");
     setBusy(true);
+
+    const history: Message[] = nextTurns.map((t) =>
+      t.who === "user"
+        ? { role: "user" as const, content: t.text }
+        : { role: "assistant" as const, content: summarize(t.env) });
+
     try {
-      const res = await chat(history(next));
-      setTurns([...next, { who: "bot", res }]);
+      const env = await chat(history, persona, seeded);
+      setThreads((prev) => {
+        const cur = prev[threadId];
+        if (!cur) return prev;
+        const turns = [...cur.turns, { who: "bot", env } as Turn];
+        return { ...prev, [threadId]: { ...cur, turns } };
+      });
+      setSelectedTurn(nextTurns.length); // the bot turn we just appended
     } catch {
-      setTurns([...next, { who: "bot", res: {
-        mode: "answer", questions: [], verdict: "Unclear",
-        answer: "I couldn't reach the policy service. Is the backend running on :8000?",
-        citations: [], exclusions_checked: [], confidence: null } }]);
+      setThreads((prev) => {
+        const cur = prev[threadId];
+        if (!cur) return prev;
+        const env: Envelope = {
+          persona, output_kind: "verdict",
+          answer: { mode: "answer", questions: [], verdict: "Unclear", answer: "Couldn't reach the policy service — is the backend running on :8000?", citations: [], exclusions_checked: [], confidence: null, referral: null },
+          audit: { persona, query: text, insurers_examined: [], clauses_examined: [], clauses_examined_count: 0, clauses_cited_count: 0, referred_to: null, timestamp: new Date().toISOString() },
+        };
+        return { ...prev, [threadId]: { ...cur, turns: [...cur.turns, { who: "bot", env }] } };
+      });
     } finally {
       setBusy(false);
     }
   }
 
+  function send() {
+    const text = input.trim();
+    if (!text || busy) return;
+
+    let tid = activeThreadId;
+    if (!tid || threads[tid]?.meta.persona !== active) {
+      tid = newId();
+      const id = tid;
+      setThreads((prev) => ({ ...prev, [id]: { meta: { id, persona: active, title: "New thread" }, turns: [] } }));
+      setActiveThreadId(tid);
+    }
+    void sendTo(tid, text, active);
+  }
+
+  function newThread(p: PersonaId) {
+    const id = newId();
+    setThreads((prev) => ({ ...prev, [id]: { meta: { id, persona: p, title: "New thread" }, turns: [] } }));
+    setActive(p);
+    setActiveThreadId(id);
+    setSelectedTurn(null);
+  }
+
+  // A confirmed referral: open a fresh thread for the target, seed it, and immediately
+  // send the carried facts AS the user's first turn — so the question appears and is answered.
+  function handoff(ref: ReferralNote) {
+    const to = ref.to_persona as PersonaId;
+    const id = newId();
+    const question = seedText(ref.facts);
+    setThreads((prev) => ({
+      ...prev,
+      [id]: { meta: { id, persona: to, title: shortTitle(ref.facts.topic || "Handoff"), originName: PERSONAS[active].name }, turns: [] },
+    }));
+    setActive(to);
+    setActiveThreadId(id);
+    setSelectedTurn(null);
+    // send after state commit
+    setTimeout(() => void sendTo(id, question, to, ref.facts), 0);
+  }
+
+  const selectedEnv =
+    current && selectedTurn != null && current.turns[selectedTurn]?.who === "bot"
+      ? (current.turns[selectedTurn] as { env: Envelope }).env
+      : null;
+
+  // The referral to act on when the handoff button is pressed = latest refer turn in this thread.
+  function currentReferral(): ReferralNote | null {
+    if (!current) return null;
+    for (let i = current.turns.length - 1; i >= 0; i--) {
+      const t = current.turns[i];
+      if (t.who === "bot" && t.env.answer.mode === "refer" && t.env.answer.referral) return t.env.answer.referral;
+    }
+    return null;
+  }
+
   return (
-    <main className="mx-auto flex min-h-screen max-w-3xl flex-col px-5">
-      <header className="flex items-baseline justify-between border-b border-[#d3dadd] py-5">
-        <h1 className="text-lg font-medium tracking-tight">
-          Motor Co-Pilot
-        </h1>
-        <span className="font-mono text-[11px] uppercase tracking-widest text-[#0e4a44]">
-          Irish private motor
-        </span>
-      </header>
+    <main className="grid h-screen grid-cols-[248px_1fr_320px] overflow-hidden"
+          style={{ ["--accent" as string]: PERSONAS[active].accent, ["--accent-soft" as string]: PERSONAS[active].accentSoft }}>
+      <aside className="min-h-0 border-r"><PersonaRail
+        active={active} threads={threadList} activeThreadId={activeThreadId}
+        onSelectPersona={selectPersona}
+        onSelectThread={(id) => { setActive(threads[id].meta.persona); setActiveThreadId(id); setSelectedTurn(null); }}
+        onNewThread={newThread} /></aside>
 
-      <div className="transcript flex-1 space-y-6 overflow-y-auto py-8">
-        {turns.length === 0 && (
-          <div className="pt-10">
-            <p className="max-w-md text-[15px] leading-relaxed text-[#3c4a48]">
-              Ask about a motor policy. I check the cover <em>and</em> the exclusions before I
-              answer — and I'll ask which insurer first, because the carve-outs differ.
-            </p>
-            <div className="mt-6 space-y-2">
-              {EXAMPLES.map((e) => (
-                <button key={e} onClick={() => send(e)}
-                  className="block w-full rounded-lg border border-[#d3dadd] bg-white/60 px-4 py-2.5 text-left text-sm text-[#3c4a48] transition hover:border-[#0e4a44] hover:text-[#12211f]">
-                  {e}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
+      <section className="min-h-0 min-w-0"><Conversation
+        persona={active}
+        turns={current?.turns ?? []}
+        busy={busy} input={input} setInput={setInput} onSend={send}
+        selectedTurn={selectedTurn} onSelectTurn={setSelectedTurn}
+        onHandoff={() => { const r = currentReferral(); if (r) handoff(r); }} /></section>
 
-        {turns.map((t, i) =>
-          t.who === "user" ? (
-            <div key={i} className="flex justify-end">
-              <div className="max-w-[80%] rounded-2xl rounded-br-sm bg-[#0e4a44] px-4 py-2.5 text-[15px] text-white">
-                {t.text}
-              </div>
-            </div>
-          ) : (
-            <BotTurn key={i} res={t.res} />
-          )
-        )}
-
-        {busy && (
-          <div className="font-mono text-[12px] text-[#6b7a78]">reading the policy…</div>
-        )}
-        <div ref={endRef} />
-      </div>
-
-      <div className="sticky bottom-0 bg-[#eef1f1] pb-6 pt-2">
-        <div className="flex items-end gap-2 rounded-xl border border-[#cdd6d5] bg-white p-2 focus-within:border-[#0e4a44]">
-          <textarea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }}
-            rows={1}
-            placeholder="Describe the situation…"
-            className="max-h-32 flex-1 resize-none bg-transparent px-2 py-1.5 text-[15px] outline-none placeholder:text-[#9aa7a5]"
-          />
-          <button onClick={() => send(input)} disabled={busy || !input.trim()}
-            className="rounded-lg bg-[#0e4a44] px-4 py-2 text-sm font-medium text-white transition disabled:opacity-40">
-            Ask
-          </button>
-        </div>
-      </div>
+      <aside className="min-h-0 border-l bg-[var(--surface)]"><AuditInspector audit={selectedEnv?.audit ?? null} /></aside>
     </main>
   );
 }
 
-function BotTurn({ res }: { res: CoPilotResponse }) {
-  if (res.mode === "clarify") {
-    return (
-      <div className="max-w-[85%]">
-        <p className="mb-2 font-mono text-[11px] uppercase tracking-widest text-[#6b7a78]">
-          A few details to pin this down
-        </p>
-        <ul className="space-y-2">
-          {res.questions.map((q, i) => (
-            <li key={i} className="flex gap-3 rounded-lg border border-[#d3dadd] bg-white px-4 py-3 text-[15px] leading-snug">
-              <span className="font-mono text-[13px] text-[#0e4a44]">{i + 1}</span>
-              <span>{q}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  }
-
-  const v = (res.verdict && VERDICT[res.verdict]) || VERDICT["Unclear"];
-  return (
-    <div className="max-w-[85%] space-y-3">
-      <div className="flex items-center gap-3">
-        <span className="rounded-full border px-3 py-1 text-[13px] font-medium"
-          style={{ color: v.fg, background: v.bg, borderColor: v.bd }}>
-          {res.verdict ?? "Unclear"}
-        </span>
-        {res.confidence != null && (
-          <span className="font-mono text-[11px] text-[#6b7a78]">
-            confidence {Math.round(res.confidence * 100)}%
-          </span>
-        )}
-      </div>
-
-      {res.answer && (
-        <p className="whitespace-pre-line text-[15px] leading-relaxed text-[#22302e]">{res.answer}</p>
-      )}
-
-      {res.citations.length > 0 && (
-        <div className="space-y-1.5 border-l-2 border-[#0e4a44] pl-3">
-          {res.citations.map((c, i) => (
-            <div key={i} className="text-[13px]">
-              <span className="font-mono text-[11px] text-[#0e4a44]">
-                {c.insurer} · {c.section}{c.page != null ? ` · p${c.page}` : ""}
-              </span>
-              <p className="text-[#4a5654]">{c.detail}</p>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {res.exclusions_checked.length > 0 && (
-        <details className="text-[13px] text-[#6b7a78]">
-          <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-widest">
-            exclusions checked ({res.exclusions_checked.length})
-          </summary>
-          <ul className="mt-1 list-disc space-y-0.5 pl-5">
-            {res.exclusions_checked.map((e, i) => <li key={i}>{e}</li>)}
-          </ul>
-        </details>
-      )}
-    </div>
-  );
+function summarize(env: Envelope): string {
+  const a = env.answer;
+  if (a.mode === "clarify") return a.questions.join(" ");
+  if (a.mode === "refer") return `Referred to ${a.referral?.to_name}.`;
+  if (env.output_kind === "verdict") return `${a.verdict}. ${a.answer ?? ""}`;
+  if (env.output_kind === "wording_read") return a.summary ?? "Wording read.";
+  return `Comparison of ${a.topic ?? "cover"} across ${(a.insurers ?? []).join(", ")}.`;
 }
